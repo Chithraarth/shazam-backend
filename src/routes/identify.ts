@@ -115,7 +115,7 @@ async function callGeminiWithRetry(imageData: string, mimeType: string, contextH
   while (attempts < 3) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-flash-latest",
         contents: [
           {
             role: "user",
