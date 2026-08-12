@@ -1,8 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import { WebhookHandlers } from "./webhookHandlers";
-import { requireAuth, requirePayment } from "./middlewares/auth";
+import { requireAuth } from "./middlewares/auth";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
@@ -22,29 +21,18 @@ app.use(
   }),
 );
 
-app.post(
-  "/api/stripe/webhook",
-  express.raw({ type: "application/json" }),
-  async (req, res): Promise<void> => {
-    const signature = req.headers["stripe-signature"];
-    if (!signature) { res.status(400).json({ error: "Missing stripe-signature" }); return; }
-    try {
-      const sig = Array.isArray(signature) ? signature[0] : signature;
-      await WebhookHandlers.processWebhook(req.body as Buffer, sig);
-      res.status(200).json({ received: true });
-    } catch (error: any) {
-      logger.error({ err: error }, "Stripe webhook error");
-      res.status(400).json({ error: "Webhook processing error" });
-    }
-  },
-);
-
 app.use(cors({ credentials: true, origin: true }));
 app.use(express.json({ limit: "20mb" }));
 app.use(express.urlencoded({ extended: true, limit: "20mb" }));
 
-export { requireAuth, requirePayment };
+export { requireAuth };
 
 app.use("/api", router);
+
+app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  logger.error({ err, url: req.url }, "Unhandled request error");
+  if (res.headersSent) return;
+  res.status(500).json({ error: "Internal server error" });
+});
 
 export default app;

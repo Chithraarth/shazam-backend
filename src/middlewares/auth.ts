@@ -1,5 +1,6 @@
 import { getAuth } from "firebase-admin/auth";
 import { firebaseApp } from "../lib/firebaseAdmin";
+import { logger } from "../lib/logger";
 
 export const isPreviewMode = (): boolean =>
   process.env.NODE_ENV !== "production" && process.env.PREVIEW_MODE !== "false";
@@ -28,7 +29,8 @@ export const requireAuth = async (req: any, res: any, next: any): Promise<void> 
     req.userId = decoded.uid;
     req.userEmail = decoded.email ?? null;
     next();
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, "ID token verification failed");
     if (isPreviewMode()) {
       req.userId = "preview-user";
       req.userEmail = "preview@videofy.test";
@@ -39,13 +41,3 @@ export const requireAuth = async (req: any, res: any, next: any): Promise<void> 
   }
 };
 
-export const requirePayment = async (req: any, res: any, next: any): Promise<void> => {
-  if (isPreviewMode()) { next(); return; }
-  const { storage } = await import("../storage");
-  const user = await storage.getUser(req.userId);
-  if (!user?.hasActiveSubscription) {
-    res.status(403).json({ error: "Active subscription required. Please subscribe to continue." });
-    return;
-  }
-  next();
-};
