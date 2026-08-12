@@ -17,7 +17,6 @@ function parseRegions(json: string | null): string[] {
 function toProfile(user: {
   id: string;
   email: string | null;
-  hasActiveSubscription: boolean;
   country: string | null;
   language: string | null;
   contentRegionsJson: string | null;
@@ -26,7 +25,6 @@ function toProfile(user: {
   return {
     id: user.id,
     email: user.email,
-    hasActiveSubscription: user.hasActiveSubscription,
     country: user.country,
     language: user.language,
     contentRegions: parseRegions(user.contentRegionsJson),

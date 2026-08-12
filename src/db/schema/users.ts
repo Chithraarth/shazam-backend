@@ -5,10 +5,6 @@ import { z } from "zod/v4";
 export const usersTable = pgTable("users", {
   id: text("id").primaryKey(),
   email: text("email"),
-  stripeCustomerId: text("stripe_customer_id"),
-  stripePaymentIntentId: text("stripe_payment_intent_id"),
-  stripeSubscriptionId: text("stripe_subscription_id"),
-  hasActiveSubscription: boolean("has_active_subscription").default(false).notNull(),
   country: text("country"),
   language: text("language"),
   contentRegionsJson: text("content_regions_json"),
