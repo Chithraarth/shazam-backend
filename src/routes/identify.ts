@@ -4,6 +4,7 @@ import { db } from "../db";
 import { searchHistoryTable } from "../db";
 import { ai } from "../gemini";
 import { storage } from "../storage";
+import { isPreviewMode } from "../middlewares/auth";
 
 const router: IRouter = Router();
 
@@ -280,7 +281,28 @@ router.post("/identify", async (req, res) => {
     req.log.error({ err }, "Failed to save search history");
   }
 
-  res.json({ ...result, historyId });
+  // Freemium: scanning is free, but the answer is locked until the user subscribes
+  let hasAccess = isPreviewMode();
+  if (!hasAccess) {
+    try {
+      const user = await storage.getUser((req as any).userId);
+      hasAccess = Boolean(user?.hasActiveSubscription);
+    } catch (err) {
+      req.log.warn({ err }, "Failed to check access for identify response");
+    }
+  }
+
+  if (!hasAccess && result.found) {
+    res.json({
+      found: result.found,
+      confidence: result.confidence,
+      locked: true,
+      historyId,
+    });
+    return;
+  }
+
+  res.json({ ...result, locked: false, historyId });
 });
 
 export default router;

@@ -5,6 +5,10 @@ import { z } from "zod/v4";
 export const usersTable = pgTable("users", {
   id: text("id").primaryKey(),
   email: text("email"),
+  hasActiveSubscription: boolean("has_active_subscription").default(false).notNull(),
+  playProductId: text("play_product_id"),
+  playPurchaseToken: text("play_purchase_token"),
+  subscriptionExpiryAt: timestamp("subscription_expiry_at"),
   country: text("country"),
   language: text("language"),
   contentRegionsJson: text("content_regions_json"),
