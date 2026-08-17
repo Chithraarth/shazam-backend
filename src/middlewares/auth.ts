@@ -40,14 +40,3 @@ export const requireAuth = async (req: any, res: any, next: any): Promise<void> 
     res.status(401).json({ error: "Unauthorized" });
   }
 };
-
-export const requirePayment = async (req: any, res: any, next: any): Promise<void> => {
-  if (isPreviewMode()) { next(); return; }
-  const { storage } = await import("../storage");
-  const user = await storage.getUser(req.userId);
-  if (!user?.hasActiveSubscription) {
-    res.status(403).json({ error: "Active subscription required. Please subscribe to continue." });
-    return;
-  }
-  next();
-};

@@ -181,6 +181,21 @@ router.post("/identify", async (req, res) => {
     return;
   }
 
+  const userId = (req as any).userId as string | undefined;
+
+  // Every scan attempt costs a credit, whether or not Gemini finds a match —
+  // charged up front so we never call the (paid) Gemini API for a request
+  // we're not going to honor.
+  let scansRemaining: number | null = null;
+  if (!isPreviewMode()) {
+    const debited = userId ? await storage.decrementScanCredit(userId) : null;
+    if (!debited) {
+      res.status(402).json({ error: "out_of_scans", message: "You're out of scans. Buy more to keep identifying." });
+      return;
+    }
+    scansRemaining = debited.scansRemaining;
+  }
+
   type IdentifyResult = {
     found: boolean;
     confidence: number;
@@ -209,7 +224,6 @@ router.post("/identify", async (req, res) => {
 
   let contextHint = "";
   try {
-    const userId = (req as any).userId as string | undefined;
     if (userId) {
       const user = await storage.getUser(userId);
       contextHint = buildUserContextHint(user);
@@ -257,7 +271,7 @@ router.post("/identify", async (req, res) => {
     const inserted = await db
       .insert(searchHistoryTable)
       .values({
-        userId: ((req as any).userId as string | undefined) ?? null,
+        userId: userId ?? null,
         found: result.found,
         confidence: result.confidence,
         title: result.title ?? null,
@@ -281,28 +295,7 @@ router.post("/identify", async (req, res) => {
     req.log.error({ err }, "Failed to save search history");
   }
 
-  // Freemium: scanning is free, but the answer is locked until the user subscribes
-  let hasAccess = isPreviewMode();
-  if (!hasAccess) {
-    try {
-      const user = await storage.getUser((req as any).userId);
-      hasAccess = Boolean(user?.hasActiveSubscription);
-    } catch (err) {
-      req.log.warn({ err }, "Failed to check access for identify response");
-    }
-  }
-
-  if (!hasAccess && result.found) {
-    res.json({
-      found: result.found,
-      confidence: result.confidence,
-      locked: true,
-      historyId,
-    });
-    return;
-  }
-
-  res.json({ ...result, locked: false, historyId });
+  res.json({ ...result, historyId, scansRemaining });
 });
 
 export default router;

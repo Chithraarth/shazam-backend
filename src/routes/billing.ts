@@ -2,9 +2,9 @@ import { Router, type IRouter } from "express";
 import { z } from "zod/v4";
 import { storage } from "../storage";
 import {
-  verifySubscriptionPurchase,
-  acknowledgeSubscriptionPurchase,
-  type SubscriptionStatus,
+  verifyProductPurchase,
+  acknowledgeProductPurchase,
+  consumeProductPurchase,
 } from "../lib/googlePlay";
 
 // Needs requireAuth — mount under the authenticated section.
@@ -13,22 +13,16 @@ const router: IRouter = Router();
 // Secured instead by the shared-secret query param — mount before requireAuth.
 const webhookRouter: IRouter = Router();
 
+// Maps each one-time product SKU to how many scan credits it grants. Add an
+// entry here for every consumable product created in Play Console.
+const SCAN_PACKS: Record<string, number> = {
+  scan_pack_50: 50,
+};
+
 const VerifyBody = z.object({
   purchaseToken: z.string().min(1),
   productId: z.string().min(1),
 });
-
-// Applies a verified Play subscription status to a user row. Shared by both
-// the client-triggered verify call and the RTDN webhook so the two paths
-// can't drift into different update logic.
-async function applySubscriptionStatus(userId: string, purchaseToken: string, status: SubscriptionStatus) {
-  return storage.updateUserSubscription(userId, {
-    hasActiveSubscription: status.isActive,
-    playProductId: status.productId,
-    playPurchaseToken: purchaseToken,
-    subscriptionExpiryAt: status.expiryTimeMillis ? new Date(status.expiryTimeMillis) : null,
-  });
-}
 
 router.post("/billing/verify", async (req: any, res) => {
   if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
@@ -36,11 +30,14 @@ router.post("/billing/verify", async (req: any, res) => {
   if (!parsed.success) { res.status(400).json({ error: "Invalid request body" }); return; }
   const { purchaseToken, productId } = parsed.data;
 
-  try {
-    const status = await verifySubscriptionPurchase(purchaseToken);
+  const scansGranted = SCAN_PACKS[productId];
+  if (!scansGranted) { res.status(400).json({ error: "Unknown product" }); return; }
 
-    if (!status.isActive) {
-      res.status(400).json({ error: "This purchase isn't active." });
+  try {
+    const status = await verifyProductPurchase(productId, purchaseToken);
+
+    if (!status.isPurchased) {
+      res.status(400).json({ error: "This purchase isn't valid." });
       return;
     }
 
@@ -54,11 +51,18 @@ router.post("/billing/verify", async (req: any, res) => {
     }
 
     if (status.acknowledgementState !== "acknowledged") {
-      await acknowledgeSubscriptionPurchase(productId, purchaseToken);
+      await acknowledgeProductPurchase(productId, purchaseToken);
     }
 
-    const user = await applySubscriptionStatus(req.userId, purchaseToken, status);
-    res.json({ hasActiveSubscription: user.hasActiveSubscription, expiryTimeMillis: status.expiryTimeMillis });
+    // grantScanCredits is idempotent (unique purchaseToken constraint), so
+    // it's safe even if the client retries this call.
+    const user = await storage.grantScanCredits(req.userId, productId, purchaseToken, scansGranted);
+
+    if (!status.alreadyConsumed) {
+      await consumeProductPurchase(productId, purchaseToken);
+    }
+
+    res.json({ scansRemaining: user.scansRemaining });
   } catch (err) {
     req.log.error({ err }, "Failed to verify Play purchase");
     res.status(500).json({ error: "Failed to verify purchase" });
@@ -85,22 +89,23 @@ webhookRouter.post("/billing/rtdn", async (req, res) => {
     if (!messageData) return;
 
     const decoded = JSON.parse(Buffer.from(messageData, "base64").toString("utf8")) as {
-      subscriptionNotification?: { purchaseToken?: string };
+      oneTimeProductNotification?: {
+        notificationType?: number;
+        purchaseToken?: string;
+        sku?: string;
+      };
     };
-    const purchaseToken = decoded.subscriptionNotification?.purchaseToken;
+    const notification = decoded.oneTimeProductNotification;
+    const purchaseToken = notification?.purchaseToken;
     if (!purchaseToken) return;
 
-    const status = await verifySubscriptionPurchase(purchaseToken);
-
-    const userId = status.obfuscatedExternalAccountId
-      ?? (await storage.getUserByPlayPurchaseToken(purchaseToken))?.id
-      ?? null;
-    if (!userId) {
-      req.log.warn({ purchaseToken }, "RTDN notification for unknown user");
-      return;
+    // ONE_TIME_PRODUCT_CANCELED = 2 (refunded/voided). We only react to
+    // voids here — a fresh purchase is credited via the client's own
+    // /billing/verify call, which has the signed-in user's context that
+    // this webhook doesn't.
+    if (notification?.notificationType === 2) {
+      await storage.revokeScanCredits(purchaseToken);
     }
-
-    await applySubscriptionStatus(userId, purchaseToken, status);
   } catch (err) {
     req.log.error({ err }, "Failed to process RTDN notification");
   }

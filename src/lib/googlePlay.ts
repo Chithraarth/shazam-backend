@@ -33,79 +33,68 @@ export function androidPackageName(): string {
   return packageName;
 }
 
-export type SubscriptionState =
-  | "active"
-  | "expired"
-  | "canceled"
-  | "in_grace_period"
-  | "on_hold"
-  | "paused"
-  | "pending"
-  | "unspecified";
-
-export type SubscriptionStatus = {
-  state: SubscriptionState;
-  isActive: boolean;
-  expiryTimeMillis: number | null;
-  productId: string | null;
+export type ProductPurchaseStatus = {
+  // 0 in the Play API; true means the purchase actually went through (not
+  // canceled/pending).
+  isPurchased: boolean;
+  alreadyConsumed: boolean;
   obfuscatedExternalAccountId: string | null;
   acknowledgementState: "acknowledged" | "pending" | "unspecified";
 };
 
-const STATE_MAP: Record<string, SubscriptionState> = {
-  SUBSCRIPTION_STATE_ACTIVE: "active",
-  SUBSCRIPTION_STATE_EXPIRED: "expired",
-  SUBSCRIPTION_STATE_CANCELED: "canceled",
-  SUBSCRIPTION_STATE_IN_GRACE_PERIOD: "in_grace_period",
-  SUBSCRIPTION_STATE_ON_HOLD: "on_hold",
-  SUBSCRIPTION_STATE_PAUSED: "paused",
-  SUBSCRIPTION_STATE_PENDING: "pending",
-};
-
-// Verifies a purchase token against the Play Developer API — this is the
-// server-side source of truth. Never trust a client's claim that it paid;
-// the purchase token alone proves nothing until Google confirms it.
-export async function verifySubscriptionPurchase(purchaseToken: string): Promise<SubscriptionStatus> {
+// Verifies a one-time (consumable) product purchase against the Play
+// Developer API — the server-side source of truth. Never trust a client's
+// claim that it paid; the purchase token alone proves nothing until Google
+// confirms it.
+export async function verifyProductPurchase(productId: string, purchaseToken: string): Promise<ProductPurchaseStatus> {
   const publisher = getPublisher();
   const packageName = androidPackageName();
 
-  const { data } = await publisher.purchases.subscriptionsv2.get({
+  const { data } = await publisher.purchases.products.get({
     packageName,
+    productId,
     token: purchaseToken,
   });
 
-  const state = STATE_MAP[data.subscriptionState ?? ""] ?? "unspecified";
-  const latestLineItem = data.lineItems?.[0] ?? null;
-  const expiryTimeMillis = latestLineItem?.expiryTime
-    ? new Date(latestLineItem.expiryTime).getTime()
-    : null;
-
-  const ackState = data.acknowledgementState === "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED"
+  const ackState = data.acknowledgementState === 1
     ? "acknowledged"
-    : data.acknowledgementState === "ACKNOWLEDGEMENT_STATE_PENDING"
+    : data.acknowledgementState === 0
       ? "pending"
       : "unspecified";
 
   return {
-    state,
-    isActive: state === "active" || state === "in_grace_period",
-    expiryTimeMillis,
-    productId: latestLineItem?.productId ?? null,
-    obfuscatedExternalAccountId: data.externalAccountIdentifiers?.obfuscatedExternalAccountId ?? null,
+    isPurchased: data.purchaseState === 0,
+    alreadyConsumed: data.consumptionState === 1,
+    obfuscatedExternalAccountId: data.obfuscatedExternalAccountId ?? null,
     acknowledgementState: ackState,
   };
 }
 
 // Play auto-refunds a purchase if it isn't acknowledged within 3 days —
 // must be called once after verifying a brand-new purchase.
-export async function acknowledgeSubscriptionPurchase(productId: string, purchaseToken: string): Promise<void> {
+export async function acknowledgeProductPurchase(productId: string, purchaseToken: string): Promise<void> {
   const publisher = getPublisher();
   const packageName = androidPackageName();
 
-  await publisher.purchases.subscriptions.acknowledge({
+  await publisher.purchases.products.acknowledge({
     packageName,
-    subscriptionId: productId,
+    productId,
     token: purchaseToken,
     requestBody: {},
+  });
+}
+
+// Marks the purchase as consumed server-side, so the user can immediately
+// buy another pack — we do this ourselves rather than relying solely on the
+// client calling finishTransaction, in case the app is killed before it
+// gets a chance to.
+export async function consumeProductPurchase(productId: string, purchaseToken: string): Promise<void> {
+  const publisher = getPublisher();
+  const packageName = androidPackageName();
+
+  await publisher.purchases.products.consume({
+    packageName,
+    productId,
+    token: purchaseToken,
   });
 }
