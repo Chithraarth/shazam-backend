@@ -41,7 +41,7 @@ router.get("/user/me", async (req: any, res) => {
 const PreferencesBody = z.object({
   country: z.string().min(1).max(100),
   language: z.string().min(1).max(100),
-  contentRegions: z.array(z.string().min(1).max(60)).min(1).max(10),
+  contentRegions: z.array(z.string().min(1).max(60)).min(1).max(12),
 });
 
 router.put("/user/preferences", async (req: any, res) => {
