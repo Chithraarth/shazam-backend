@@ -34,8 +34,9 @@ export function androidPackageName(): string {
 }
 
 export type ProductPurchaseStatus = {
-  // 0 in the Play API; true means the purchase actually went through (not
-  // canceled/pending).
+  // Play's purchaseState: 0 = purchased, 1 = canceled, 2 = pending (e.g. a
+  // UPI or cash payment that hasn't completed yet).
+  state: "purchased" | "canceled" | "pending";
   isPurchased: boolean;
   alreadyConsumed: boolean;
   obfuscatedExternalAccountId: string | null;
@@ -62,8 +63,11 @@ export async function verifyProductPurchase(productId: string, purchaseToken: st
       ? "pending"
       : "unspecified";
 
+  const state = data.purchaseState === 0 ? "purchased" : data.purchaseState === 2 ? "pending" : "canceled";
+
   return {
-    isPurchased: data.purchaseState === 0,
+    state,
+    isPurchased: state === "purchased",
     alreadyConsumed: data.consumptionState === 1,
     obfuscatedExternalAccountId: data.obfuscatedExternalAccountId ?? null,
     acknowledgementState: ackState,

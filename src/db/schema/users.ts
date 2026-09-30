@@ -2,9 +2,8 @@ import { pgTable, text, boolean, integer, timestamp, serial } from "drizzle-orm/
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
-// New users start with a handful of free scans so they can try the app
-// before ever needing to buy a scan pack.
-export const FREE_SCAN_CREDITS = 5;
+// No free tier: every scan is paid for with a purchased scan pack.
+export const FREE_SCAN_CREDITS = 0;
 
 export const usersTable = pgTable("users", {
   id: text("id").primaryKey(),
@@ -25,6 +24,9 @@ export const usersTable = pgTable("users", {
 export const scanPurchasesTable = pgTable("scan_purchases", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull(),
+  // "android" (purchaseToken is the Play purchase token) or "ios"
+  // (purchaseToken holds the App Store transactionId).
+  platform: text("platform").notNull().default("android"),
   productId: text("product_id").notNull(),
   purchaseToken: text("purchase_token").notNull().unique(),
   scansGranted: integer("scans_granted").notNull(),

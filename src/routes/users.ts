@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { z } from "zod/v4";
 import { storage } from "../storage";
+import { appAccountTokenFor } from "../lib/appStore";
 
 const router: IRouter = Router();
 
@@ -27,6 +28,8 @@ function toProfile(user: {
     id: user.id,
     email: user.email,
     scansRemaining: user.scansRemaining,
+    // Passed as StoreKit's appAccountToken on iOS purchases (see billing.ts).
+    appAccountToken: appAccountTokenFor(user.id),
     country: user.country,
     language: user.language,
     contentRegions: parseRegions(user.contentRegionsJson),

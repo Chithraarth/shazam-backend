@@ -37,48 +37,69 @@ export class Storage {
     return user ?? null;
   }
 
-  // Idempotent: the unique constraint on purchaseToken means re-verifying
-  // the same purchase (client retry, or both RTDN and the client reporting
-  // it) can only ever grant credits once.
-  async grantScanCredits(userId: string, productId: string, purchaseToken: string, scansGranted: number) {
-    const inserted = await db.insert(scanPurchasesTable)
-      .values({ userId, productId, purchaseToken, scansGranted })
-      .onConflictDoNothing({ target: scanPurchasesTable.purchaseToken })
-      .returning({ id: scanPurchasesTable.id });
-
-    if (inserted.length > 0) {
-      await db.update(usersTable)
-        .set({ scansRemaining: sql`${usersTable.scansRemaining} + ${scansGranted}`, updatedAt: new Date() })
-        .where(eq(usersTable.id, userId));
-    }
-
-    const [user] = await db.select().from(usersTable).where(eq(usersTable.id, userId));
-    return user;
+  // Gives back a credit taken by decrementScanCredit when the scan failed on
+  // our side (e.g. Gemini errored), so the user isn't charged for it.
+  async refundScanCredit(userId: string) {
+    const [user] = await db.update(usersTable)
+      .set({ scansRemaining: sql`${usersTable.scansRemaining} + 1`, updatedAt: new Date() })
+      .where(eq(usersTable.id, userId))
+      .returning();
+    return user ?? null;
   }
 
-  // Called when Play reports a purchase as voided/refunded — reverses
+  // Idempotent: the unique constraint on purchaseToken means re-verifying
+  // the same purchase (client retry, or both RTDN and the client reporting
+  // it) can only ever grant credits once. Recording the purchase and adding
+  // the credits happen in one transaction, so a crash between the two can't
+  // leave a purchase recorded with no credits granted.
+  async grantScanCredits(
+    userId: string,
+    productId: string,
+    purchaseToken: string,
+    scansGranted: number,
+    platform: "android" | "ios" = "android",
+  ) {
+    return db.transaction(async (tx) => {
+      // RTDN can credit a purchase before the buyer's first /user/me call.
+      await tx.insert(usersTable).values({ id: userId }).onConflictDoNothing();
+
+      const inserted = await tx.insert(scanPurchasesTable)
+        .values({ userId, platform, productId, purchaseToken, scansGranted })
+        .onConflictDoNothing({ target: scanPurchasesTable.purchaseToken })
+        .returning({ id: scanPurchasesTable.id });
+
+      if (inserted.length > 0) {
+        await tx.update(usersTable)
+          .set({ scansRemaining: sql`${usersTable.scansRemaining} + ${scansGranted}`, updatedAt: new Date() })
+          .where(eq(usersTable.id, userId));
+      }
+
+      const [user] = await tx.select().from(usersTable).where(eq(usersTable.id, userId));
+      return { user, newlyGranted: inserted.length > 0 };
+    });
+  }
+
+  // Called when a store reports a purchase as refunded/voided — reverses
   // exactly the credits that specific purchase granted, and only once
   // (guarded by revokedAt), floored at zero so it can't push the count
   // negative if the user has already spent some of those credits.
   async revokeScanCredits(purchaseToken: string) {
-    const [purchase] = await db.select().from(scanPurchasesTable)
-      .where(eq(scanPurchasesTable.purchaseToken, purchaseToken));
-    if (!purchase || purchase.revokedAt) return null;
+    return db.transaction(async (tx) => {
+      const [revoked] = await tx.update(scanPurchasesTable)
+        .set({ revokedAt: new Date() })
+        .where(sql`${scanPurchasesTable.purchaseToken} = ${purchaseToken} AND ${isNull(scanPurchasesTable.revokedAt)}`)
+        .returning();
+      if (!revoked) return null;
 
-    const [revoked] = await db.update(scanPurchasesTable)
-      .set({ revokedAt: new Date() })
-      .where(sql`${scanPurchasesTable.purchaseToken} = ${purchaseToken} AND ${isNull(scanPurchasesTable.revokedAt)}`)
-      .returning();
-    if (!revoked) return null;
+      await tx.update(usersTable)
+        .set({
+          scansRemaining: sql`GREATEST(${usersTable.scansRemaining} - ${revoked.scansGranted}, 0)`,
+          updatedAt: new Date(),
+        })
+        .where(eq(usersTable.id, revoked.userId));
 
-    await db.update(usersTable)
-      .set({
-        scansRemaining: sql`GREATEST(${usersTable.scansRemaining} - ${purchase.scansGranted}, 0)`,
-        updatedAt: new Date(),
-      })
-      .where(eq(usersTable.id, purchase.userId));
-
-    return purchase.userId;
+      return revoked.userId;
+    });
   }
 }
 

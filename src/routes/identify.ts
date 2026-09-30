@@ -232,14 +232,19 @@ router.post("/identify", async (req, res) => {
     req.log.warn({ err }, "Failed to load user preferences for identify");
   }
 
+  let geminiFailed = false;
   try {
     const rawText = await callGeminiWithRetry(imageData, mimeType, contextHint);
     const parsed = parseGeminiResponse(rawText);
+    if (!parsed) {
+      req.log.error({ rawText: rawText.slice(0, 500) }, "Gemini returned an unparseable response");
+      geminiFailed = true;
+    }
 
     if (parsed) {
       result = {
         found: Boolean(parsed.found),
-        confidence: Number(parsed.confidence ?? 0),
+        confidence: Math.max(0, Math.min(100, Math.round(Number(parsed.confidence) || 0))),
         title: (parsed.title as string) ?? null,
         type: (parsed.type as string) ?? null,
         year: parsed.year != null ? Number(parsed.year) : null,
@@ -262,7 +267,26 @@ router.post("/identify", async (req, res) => {
     }
   } catch (err) {
     req.log.error({ err }, "Gemini identification failed");
-    result = { found: false, confidence: 0 };
+    geminiFailed = true;
+  }
+
+  // Our failure, not a real "no match" — give the credit back and don't
+  // record it in history, so the user isn't charged for it.
+  if (geminiFailed) {
+    if (scansRemaining !== null && userId) {
+      try {
+        const refunded = await storage.refundScanCredit(userId);
+        scansRemaining = refunded?.scansRemaining ?? scansRemaining;
+      } catch (err) {
+        req.log.error({ err, userId }, "Failed to refund scan credit after Gemini failure");
+      }
+    }
+    res.status(502).json({
+      error: "identify_failed",
+      message: "We couldn't analyse that frame right now. Your scan wasn't used — please try again.",
+      scansRemaining,
+    });
+    return;
   }
 
   let historyId: number | null = null;
