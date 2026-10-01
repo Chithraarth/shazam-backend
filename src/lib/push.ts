@@ -20,7 +20,7 @@ export async function notifyUser(userId: string, title: string, body: string, da
       tokens,
       notification: { title, body },
       data,
-      android: { priority: "high", notification: { channelId: "payments" } },
+      android: { priority: "high" },
     });
     const dead = result.responses
       .map((r, i) => (!r.success && r.error && DEAD_TOKEN_CODES.has(r.error.code) ? tokens[i] : null))
