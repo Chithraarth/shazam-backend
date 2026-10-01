@@ -64,6 +64,26 @@ router.put("/user/preferences", async (req: any, res) => {
   res.json(toProfile(updated));
 });
 
+const PushTokenBody = z.object({
+  token: z.string().min(10).max(4096),
+  platform: z.enum(["android", "ios"]),
+});
+
+router.post("/user/push-token", async (req: any, res) => {
+  if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const parsed = PushTokenBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: "Invalid token" }); return; }
+  await storage.savePushToken(req.userId, parsed.data.token, parsed.data.platform);
+  res.json({ success: true });
+});
+
+router.delete("/user/push-token", async (req: any, res) => {
+  if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  const token = typeof req.body?.token === "string" ? req.body.token : null;
+  if (token) await storage.removePushToken(req.userId, token);
+  res.json({ success: true });
+});
+
 router.delete("/user/me", async (req: any, res) => {
   if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
   try {

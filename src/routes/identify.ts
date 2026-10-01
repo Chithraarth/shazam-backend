@@ -5,6 +5,7 @@ import { searchHistoryTable } from "../db";
 import { ai } from "../gemini";
 import { storage } from "../storage";
 import { isPreviewMode } from "../middlewares/auth";
+import { lookupTitle, type CatalogInfo } from "../lib/tmdb";
 
 const router: IRouter = Router();
 
@@ -174,6 +175,10 @@ router.post("/identify", async (req, res) => {
   }
 
   const { imageData, mimeType, source } = parsed.data;
+  // The app sends the device's region (ISO 3166 alpha-2) so "where to watch"
+  // lists the streaming apps available there.
+  const rawRegion = typeof req.body?.region === "string" ? req.body.region.toUpperCase() : "";
+  const region = /^[A-Z]{2}$/.test(rawRegion) ? rawRegion : "IN";
 
   const imageBytes = Buffer.from(imageData, "base64");
   if (imageBytes.length > 8 * 1024 * 1024) {
@@ -218,6 +223,7 @@ router.post("/identify", async (req, res) => {
     alternativeTitles?: string[];
     identificationClues?: string | null;
     historyId?: number | null;
+    catalog?: CatalogInfo | null;
   };
 
   let result: IdentifyResult = { found: false, confidence: 0 };
@@ -287,6 +293,10 @@ router.post("/identify", async (req, res) => {
       scansRemaining,
     });
     return;
+  }
+
+  if (result.found) {
+    result.catalog = await lookupTitle({ title: result.title, year: result.year, type: result.type, region });
   }
 
   let historyId: number | null = null;

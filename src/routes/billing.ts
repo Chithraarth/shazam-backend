@@ -2,6 +2,7 @@ import { Router, type IRouter } from "express";
 import { z } from "zod/v4";
 import { storage } from "../storage";
 import { logger } from "../lib/logger";
+import { notifyUser } from "../lib/push";
 import {
   verifyProductPurchase,
   acknowledgeProductPurchase,
@@ -58,7 +59,13 @@ async function creditAndroidPurchase(expectedUserId: string | null, productId: s
     await acknowledgeProductPurchase(productId, purchaseToken);
   }
 
-  const { user } = await storage.grantScanCredits(ownerId, productId, purchaseToken, scansGranted, "android");
+  const { user, newlyGranted } = await storage.grantScanCredits(ownerId, productId, purchaseToken, scansGranted, "android");
+
+  // Credited from the webhook (a pending UPI/cash payment completing) — the
+  // user is probably not in the app, so tell them.
+  if (newlyGranted && expectedUserId === null) {
+    void notifyUser(ownerId, `+${scansGranted} scans added`, `Your payment went through. You now have ${user.scansRemaining} scans.`, { type: "credited" });
+  }
 
   // Consumed server-side so the pack can be bought again even if the app is
   // killed before it finishes the transaction itself.
@@ -171,7 +178,8 @@ webhookRouter.post("/billing/rtdn", async (req, res) => {
     // Refunds and chargebacks arrive as voided purchases.
     const voidedToken = decoded.voidedPurchaseNotification?.purchaseToken;
     if (voidedToken) {
-      await storage.revokeScanCredits(voidedToken);
+      const userId = await storage.revokeScanCredits(voidedToken);
+      if (userId) void notifyUser(userId, "Refund processed", "Your scan pack was refunded, so its scans were removed.", { type: "refunded" });
       return;
     }
 

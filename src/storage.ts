@@ -1,6 +1,6 @@
 import { db } from "./db";
-import { usersTable, scanPurchasesTable, searchHistoryTable } from "./db";
-import { desc, eq, sql, isNull } from "drizzle-orm";
+import { usersTable, scanPurchasesTable, searchHistoryTable, deviceTokensTable } from "./db";
+import { and, desc, eq, sql, isNull } from "drizzle-orm";
 
 export class Storage {
   async getOrCreateUser(id: string, email?: string | null) {
@@ -50,8 +50,20 @@ export class Storage {
   async deleteUserData(userId: string) {
     await db.transaction(async (tx) => {
       await tx.delete(searchHistoryTable).where(eq(searchHistoryTable.userId, userId));
+      await tx.delete(deviceTokensTable).where(eq(deviceTokensTable.userId, userId));
       await tx.delete(usersTable).where(eq(usersTable.id, userId));
     });
+  }
+
+  // A token moves to whoever signed in on that install most recently.
+  async savePushToken(userId: string, token: string, platform: string) {
+    await db.insert(deviceTokensTable)
+      .values({ userId, token, platform })
+      .onConflictDoUpdate({ target: deviceTokensTable.token, set: { userId, platform, updatedAt: new Date() } });
+  }
+
+  async removePushToken(userId: string, token: string) {
+    await db.delete(deviceTokensTable).where(and(eq(deviceTokensTable.token, token), eq(deviceTokensTable.userId, userId)));
   }
 
   async refundScanCredit(userId: string) {
