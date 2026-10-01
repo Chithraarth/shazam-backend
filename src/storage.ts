@@ -1,6 +1,6 @@
 import { db } from "./db";
-import { usersTable, scanPurchasesTable } from "./db";
-import { eq, sql, isNull } from "drizzle-orm";
+import { usersTable, scanPurchasesTable, searchHistoryTable } from "./db";
+import { desc, eq, sql, isNull } from "drizzle-orm";
 
 export class Storage {
   async getOrCreateUser(id: string, email?: string | null) {
@@ -39,6 +39,21 @@ export class Storage {
 
   // Gives back a credit taken by decrementScanCredit when the scan failed on
   // our side (e.g. Gemini errored), so the user isn't charged for it.
+  async listPurchases(userId: string) {
+    return db.select().from(scanPurchasesTable)
+      .where(eq(scanPurchasesTable.userId, userId))
+      .orderBy(desc(scanPurchasesTable.createdAt));
+  }
+
+  // Erases the user's profile and scan history. Purchase records are kept,
+  // as financial records must be retained after an account is deleted.
+  async deleteUserData(userId: string) {
+    await db.transaction(async (tx) => {
+      await tx.delete(searchHistoryTable).where(eq(searchHistoryTable.userId, userId));
+      await tx.delete(usersTable).where(eq(usersTable.id, userId));
+    });
+  }
+
   async refundScanCredit(userId: string) {
     const [user] = await db.update(usersTable)
       .set({ scansRemaining: sql`${usersTable.scansRemaining} + 1`, updatedAt: new Date() })

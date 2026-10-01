@@ -64,4 +64,15 @@ router.put("/user/preferences", async (req: any, res) => {
   res.json(toProfile(updated));
 });
 
+router.delete("/user/me", async (req: any, res) => {
+  if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    await storage.deleteUserData(req.userId);
+    res.json({ success: true });
+  } catch (err) {
+    req.log.error({ err }, "Failed to delete user data");
+    res.status(500).json({ error: "Failed to delete account" });
+  }
+});
+
 export default router;

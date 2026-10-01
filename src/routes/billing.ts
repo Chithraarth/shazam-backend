@@ -127,6 +127,24 @@ router.post("/billing/verify", async (req: any, res) => {
   }
 });
 
+router.get("/billing/purchases", async (req: any, res) => {
+  if (!req.userId) { res.status(401).json({ error: "Unauthorized" }); return; }
+  try {
+    const rows = await storage.listPurchases(req.userId);
+    res.json(rows.map((r) => ({
+      id: r.id,
+      productId: r.productId,
+      platform: r.platform,
+      scansGranted: r.scansGranted,
+      createdAt: r.createdAt.toISOString(),
+      refunded: r.revokedAt != null,
+    })));
+  } catch (err) {
+    req.log.error({ err }, "Failed to list purchases");
+    res.status(500).json({ error: "Failed to load purchases" });
+  }
+});
+
 // Pub/Sub push endpoint for Google Play Real-time Developer Notifications.
 // Configure the push subscription's endpoint URL as
 // .../api/billing/rtdn?token=<RTDN_WEBHOOK_SECRET>.
