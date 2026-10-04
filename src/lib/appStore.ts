@@ -1,71 +1,65 @@
 import { createHash } from "node:crypto";
 import {
-  APIError,
-  APIException,
-  AppStoreServerAPIClient,
   Environment,
+  SignedDataVerifier,
   type JWSTransactionDecodedPayload,
+  type ResponseBodyV2DecodedPayload,
 } from "@apple/app-store-server-library";
+import { APPLE_ROOT_CERTS } from "./apple-root-certs";
+import { logger } from "./logger";
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing ${name}`);
-  return value;
+// Apple In-App Purchase (StoreKit 2) verification.
+//
+// The app never just tells us "I paid": it sends the JWS-signed transaction
+// StoreKit gave it, and we verify Apple's signature chain (up to Apple Root
+// CA G3) locally before trusting any field. App Store Server Notifications
+// V2 are verified the same way. No App Store Server API key is needed.
+//
+// Env:
+//  - IOS_BUNDLE_ID  (default com.videofy.app)
+//  - APPLE_APP_ID   numeric App Store app id (App Store Connect → App
+//                   Information → Apple ID). Apple's library needs it to
+//                   verify PRODUCTION data; until it's set only Sandbox /
+//                   TestFlight purchases verify.
+export const IOS_BUNDLE_ID = process.env.IOS_BUNDLE_ID || "com.videofy.app";
+const APPLE_APP_ID = process.env.APPLE_APP_ID ? Number(process.env.APPLE_APP_ID) : undefined;
+
+const verifiers: { env: Environment; verifier: SignedDataVerifier }[] = [];
+if (APPLE_APP_ID) {
+  verifiers.push({
+    env: Environment.PRODUCTION,
+    verifier: new SignedDataVerifier(APPLE_ROOT_CERTS, true, Environment.PRODUCTION, IOS_BUNDLE_ID, APPLE_APP_ID),
+  });
+} else {
+  logger.warn("APPLE_APP_ID is not set - only Sandbox/TestFlight Apple purchases can be verified");
 }
+verifiers.push({
+  env: Environment.SANDBOX,
+  verifier: new SignedDataVerifier(APPLE_ROOT_CERTS, true, Environment.SANDBOX, IOS_BUNDLE_ID),
+});
 
-export function iosBundleId(): string {
-  return requireEnv("IOS_BUNDLE_ID");
-}
+export class AppleVerificationError extends Error {}
 
-const clients = new Map<Environment, AppStoreServerAPIClient>();
-
-function getClient(environment: Environment): AppStoreServerAPIClient {
-  let client = clients.get(environment);
-  if (!client) {
-    client = new AppStoreServerAPIClient(
-      requireEnv("APPLE_IAP_PRIVATE_KEY").replace(/\\n/g, "\n"),
-      requireEnv("APPLE_IAP_KEY_ID"),
-      requireEnv("APPLE_IAP_ISSUER_ID"),
-      iosBundleId(),
-      environment,
-    );
-    clients.set(environment, client);
-  }
-  return client;
-}
-
-// Decodes a JWS payload without checking its signature. Only use this on
-// data we fetched from Apple ourselves over the authenticated App Store
-// Server API — never on anything a client or webhook caller sent us.
-export function decodeJwsPayload<T>(jws: string): T {
-  const payload = jws.split(".")[1];
-  if (!payload) throw new Error("Malformed JWS");
-  return JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as T;
-}
-
-function isNotFound(err: unknown): boolean {
-  return (
-    err instanceof APIException &&
-    (err.httpStatusCode === 404 ||
-      err.apiError === APIError.TRANSACTION_ID_NOT_FOUND ||
-      err.apiError === APIError.INVALID_TRANSACTION_ID)
-  );
-}
-
-// Looks a transaction up with Apple — the server-side source of truth.
-// Production is tried first; sandbox covers TestFlight and App Review
-// purchases, which Apple routes to sandbox even for a production build.
-export async function getAppStoreTransaction(transactionId: string): Promise<JWSTransactionDecodedPayload | null> {
-  for (const environment of [Environment.PRODUCTION, Environment.SANDBOX]) {
+// Production first, then Sandbox (TestFlight, App Review and sandbox testers).
+async function firstVerified<T>(fn: (v: SignedDataVerifier) => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (const { verifier } of verifiers) {
     try {
-      const { signedTransactionInfo } = await getClient(environment).getTransactionInfo(transactionId);
-      if (!signedTransactionInfo) return null;
-      return decodeJwsPayload<JWSTransactionDecodedPayload>(signedTransactionInfo);
+      return await fn(verifier);
     } catch (err) {
-      if (!isNotFound(err)) throw err;
+      lastErr = err;
     }
   }
-  return null;
+  logger.warn({ err: lastErr }, "Apple signed data failed verification in every environment");
+  throw new AppleVerificationError("Apple couldn't confirm this purchase.");
+}
+
+export function verifyAppleTransaction(signedTransaction: string): Promise<JWSTransactionDecodedPayload> {
+  return firstVerified((v) => v.verifyAndDecodeTransaction(signedTransaction));
+}
+
+export function verifyAppleNotification(signedPayload: string): Promise<ResponseBodyV2DecodedPayload> {
+  return firstVerified((v) => v.verifyAndDecodeNotification(signedPayload));
 }
 
 // StoreKit's appAccountToken must be a UUID, but Firebase UIDs aren't, so

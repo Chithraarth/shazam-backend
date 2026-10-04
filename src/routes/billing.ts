@@ -8,7 +8,7 @@ import {
   acknowledgeProductPurchase,
   consumeProductPurchase,
 } from "../lib/googlePlay";
-import { appAccountTokenFor, decodeJwsPayload, getAppStoreTransaction, iosBundleId } from "../lib/appStore";
+import { AppleVerificationError, appAccountTokenFor, IOS_BUNDLE_ID, verifyAppleNotification, verifyAppleTransaction } from "../lib/appStore";
 
 // Needs requireAuth — mount under the authenticated section.
 const router: IRouter = Router();
@@ -76,13 +76,18 @@ async function creditAndroidPurchase(expectedUserId: string | null, productId: s
   return { status: "credited", scansRemaining: user.scansRemaining };
 }
 
-async function creditIosPurchase(userId: string, productId: string, transactionId: string): Promise<CreditOutcome> {
+async function creditIosPurchase(userId: string, productId: string, signedTransaction: string): Promise<CreditOutcome> {
   const scansGranted = SCAN_PACKS[productId];
   if (!scansGranted) throw new BillingError(400, "Unknown product");
 
-  const tx = await getAppStoreTransaction(transactionId);
-  if (!tx) throw new BillingError(400, "This purchase isn't valid.");
-  if (tx.bundleId !== iosBundleId() || tx.productId !== productId) {
+  let tx;
+  try {
+    tx = await verifyAppleTransaction(signedTransaction);
+  } catch (err) {
+    if (err instanceof AppleVerificationError) throw new BillingError(400, "This purchase isn't valid.");
+    throw err;
+  }
+  if (!tx.transactionId || tx.bundleId !== IOS_BUNDLE_ID || tx.productId !== productId) {
     throw new BillingError(400, "This purchase isn't valid.");
   }
   if (tx.revocationDate) throw new BillingError(400, "This purchase was refunded.");
@@ -90,7 +95,7 @@ async function creditIosPurchase(userId: string, productId: string, transactionI
     throw new BillingError(403, "This purchase belongs to a different account.");
   }
 
-  const { user } = await storage.grantScanCredits(userId, productId, transactionId, scansGranted, "ios");
+  const { user } = await storage.grantScanCredits(userId, productId, tx.transactionId, scansGranted, "ios");
   return { status: "credited", scansRemaining: user.scansRemaining };
 }
 
@@ -103,7 +108,8 @@ const VerifyBody = z.discriminatedUnion("platform", [
   z.object({
     platform: z.literal("ios"),
     productId: z.string().min(1),
-    transactionId: z.string().min(1),
+    // StoreKit 2 JWS-signed transaction (Purchase.purchaseToken on iOS).
+    signedTransaction: z.string().min(1),
   }),
 ]);
 
@@ -117,7 +123,7 @@ router.post("/billing/verify", async (req: any, res) => {
   try {
     const outcome = parsed.data.platform === "android"
       ? await creditAndroidPurchase(req.userId, parsed.data.productId, parsed.data.purchaseToken)
-      : await creditIosPurchase(req.userId, parsed.data.productId, parsed.data.transactionId);
+      : await creditIosPurchase(req.userId, parsed.data.productId, parsed.data.signedTransaction);
 
     if (outcome.status === "pending") {
       res.status(202).json({ status: "pending" });
@@ -200,9 +206,9 @@ webhookRouter.post("/billing/rtdn", async (req, res) => {
 });
 
 // App Store Server Notifications V2. Set this URL in App Store Connect →
-// App Information → App Store Server Notifications. The body is only used
-// to learn which transaction changed; its state is then re-read from Apple's
-// API, so a forged notification can't revoke anything.
+// App Information → App Store Server Notifications. Apple's signature is
+// verified before anything is trusted, so a forged notification can't
+// revoke credits.
 webhookRouter.post("/billing/apple-notifications", async (req, res) => {
   res.status(200).end();
 
@@ -210,14 +216,11 @@ webhookRouter.post("/billing/apple-notifications", async (req, res) => {
     const signedPayload = (req.body as { signedPayload?: string })?.signedPayload;
     if (!signedPayload) return;
 
-    const notification = decodeJwsPayload<{ notificationType?: string; data?: { signedTransactionInfo?: string } }>(signedPayload);
+    const notification = await verifyAppleNotification(signedPayload);
     if (notification.notificationType !== "REFUND" || !notification.data?.signedTransactionInfo) return;
 
-    const claimed = decodeJwsPayload<{ transactionId?: string }>(notification.data.signedTransactionInfo);
-    if (!claimed.transactionId) return;
-
-    const tx = await getAppStoreTransaction(claimed.transactionId);
-    if (tx?.transactionId && tx.revocationDate) {
+    const tx = await verifyAppleTransaction(notification.data.signedTransactionInfo);
+    if (tx.transactionId && tx.revocationDate) {
       await storage.revokeScanCredits(tx.transactionId);
     }
   } catch (err) {
