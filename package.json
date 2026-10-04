@@ -11,6 +11,7 @@
     "db:push": "drizzle-kit push --config ./drizzle.config.ts"
   },
   "dependencies": {
+    "@apple/app-store-server-library": "^3.1.0",
     "@google/genai": "^1.44.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
