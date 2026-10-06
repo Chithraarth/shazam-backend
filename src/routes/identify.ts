@@ -4,6 +4,8 @@ import { db } from "../db";
 import { searchHistoryTable } from "../db";
 import { ai } from "../gemini";
 import { storage } from "../storage";
+import { isPreviewMode } from "../middlewares/auth";
+import { lookupTitle, type CatalogInfo } from "../lib/tmdb";
 
 const router: IRouter = Router();
 
@@ -115,7 +117,7 @@ async function callGeminiWithRetry(imageData: string, mimeType: string, contextH
   while (attempts < 3) {
     try {
       const response = await ai.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-flash-latest",
         contents: [
           {
             role: "user",
@@ -173,11 +175,30 @@ router.post("/identify", async (req, res) => {
   }
 
   const { imageData, mimeType, source } = parsed.data;
+  // The app sends the device's region (ISO 3166 alpha-2) so "where to watch"
+  // lists the streaming apps available there.
+  const rawRegion = typeof req.body?.region === "string" ? req.body.region.toUpperCase() : "";
+  const region = /^[A-Z]{2}$/.test(rawRegion) ? rawRegion : "IN";
 
   const imageBytes = Buffer.from(imageData, "base64");
   if (imageBytes.length > 8 * 1024 * 1024) {
     res.status(400).json({ error: "Image too large. Please use a smaller frame (max 8MB)." });
     return;
+  }
+
+  const userId = (req as any).userId as string | undefined;
+
+  // Every scan attempt costs a credit, whether or not Gemini finds a match —
+  // charged up front so we never call the (paid) Gemini API for a request
+  // we're not going to honor.
+  let scansRemaining: number | null = null;
+  if (!isPreviewMode()) {
+    const debited = userId ? await storage.decrementScanCredit(userId) : null;
+    if (!debited) {
+      res.status(402).json({ error: "out_of_scans", message: "You're out of scans. Buy more to keep identifying." });
+      return;
+    }
+    scansRemaining = debited.scansRemaining;
   }
 
   type IdentifyResult = {
@@ -202,13 +223,13 @@ router.post("/identify", async (req, res) => {
     alternativeTitles?: string[];
     identificationClues?: string | null;
     historyId?: number | null;
+    catalog?: CatalogInfo | null;
   };
 
   let result: IdentifyResult = { found: false, confidence: 0 };
 
   let contextHint = "";
   try {
-    const userId = (req as any).userId as string | undefined;
     if (userId) {
       const user = await storage.getUser(userId);
       contextHint = buildUserContextHint(user);
@@ -217,14 +238,19 @@ router.post("/identify", async (req, res) => {
     req.log.warn({ err }, "Failed to load user preferences for identify");
   }
 
+  let geminiFailed = false;
   try {
     const rawText = await callGeminiWithRetry(imageData, mimeType, contextHint);
     const parsed = parseGeminiResponse(rawText);
+    if (!parsed) {
+      req.log.error({ rawText: rawText.slice(0, 500) }, "Gemini returned an unparseable response");
+      geminiFailed = true;
+    }
 
     if (parsed) {
       result = {
         found: Boolean(parsed.found),
-        confidence: Number(parsed.confidence ?? 0),
+        confidence: Math.max(0, Math.min(100, Math.round(Number(parsed.confidence) || 0))),
         title: (parsed.title as string) ?? null,
         type: (parsed.type as string) ?? null,
         year: parsed.year != null ? Number(parsed.year) : null,
@@ -247,7 +273,30 @@ router.post("/identify", async (req, res) => {
     }
   } catch (err) {
     req.log.error({ err }, "Gemini identification failed");
-    result = { found: false, confidence: 0 };
+    geminiFailed = true;
+  }
+
+  // Our failure, not a real "no match" — give the credit back and don't
+  // record it in history, so the user isn't charged for it.
+  if (geminiFailed) {
+    if (scansRemaining !== null && userId) {
+      try {
+        const refunded = await storage.refundScanCredit(userId);
+        scansRemaining = refunded?.scansRemaining ?? scansRemaining;
+      } catch (err) {
+        req.log.error({ err, userId }, "Failed to refund scan credit after Gemini failure");
+      }
+    }
+    res.status(502).json({
+      error: "identify_failed",
+      message: "We couldn't analyse that frame right now. Your scan wasn't used — please try again.",
+      scansRemaining,
+    });
+    return;
+  }
+
+  if (result.found) {
+    result.catalog = await lookupTitle({ title: result.title, year: result.year, type: result.type, region });
   }
 
   let historyId: number | null = null;
@@ -256,7 +305,7 @@ router.post("/identify", async (req, res) => {
     const inserted = await db
       .insert(searchHistoryTable)
       .values({
-        userId: ((req as any).userId as string | undefined) ?? null,
+        userId: userId ?? null,
         found: result.found,
         confidence: result.confidence,
         title: result.title ?? null,
@@ -280,7 +329,7 @@ router.post("/identify", async (req, res) => {
     req.log.error({ err }, "Failed to save search history");
   }
 
-  res.json({ ...result, historyId });
+  res.json({ ...result, historyId, scansRemaining });
 });
 
 export default router;

@@ -4,12 +4,17 @@ import healthRouter from "./health";
 import identifyRouter from "./identify";
 import historyRouter from "./history";
 import usersRouter from "./users";
+import catalogRouter from "./catalog";
+import billingRouter, { webhookRouter as billingWebhookRouter } from "./billing";
 
 const router: IRouter = Router();
 
 router.use(healthRouter);
+router.use(billingWebhookRouter);
 router.use(requireAuth, usersRouter);
 router.use(requireAuth, identifyRouter);
+router.use(requireAuth, billingRouter);
 router.use(requireAuth, historyRouter);
+router.use(requireAuth, catalogRouter);
 
 export default router;

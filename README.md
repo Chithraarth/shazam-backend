@@ -1,12 +1,12 @@
 # Shazam Backend (Videofy API)
 
-Standalone Express 5 + TypeScript API server: Gemini Vision identification, Firebase auth, Stripe subscriptions, PostgreSQL history.
+Standalone Express 5 + TypeScript API server: Gemini Vision identification, Firebase auth, Google Play + App Store scan-credit packs, PostgreSQL history.
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env   # fill in DATABASE_URL, Firebase, Gemini, Stripe keys
+cp .env.example .env   # fill in DATABASE_URL, Firebase, Gemini, Google Play and App Store keys
 npm run db:push        # create database tables
 npm run dev            # http://localhost:8080
 ```
@@ -21,8 +21,8 @@ npm run dev            # http://localhost:8080
 
 ## Structure
 
-- `src/routes/` — identify (Gemini), history, users, stripe, health
-- `src/middlewares/` — Firebase auth (`requireAuth`, `requirePayment`)
+- `src/routes/` — identify (Gemini), history, users, billing (Play + App Store verification and store notifications), health
+- `src/middlewares/` — Firebase auth (`requireAuth`)
 - `src/lib/firebaseAdmin.ts` — Firebase Admin SDK init
 - `src/db/` — Drizzle ORM schema + client (formerly `@workspace/db`)
 - `src/schemas/` — Zod request/response validation (formerly `@workspace/api-zod`)
