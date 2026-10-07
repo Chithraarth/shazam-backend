@@ -201,6 +201,22 @@ router.post("/identify", async (req, res) => {
     scansRemaining = debited.scansRemaining;
   }
 
+  // If the app gives up (timeout, backgrounded, lost signal) before we
+  // answer, the user never sees the result, so they shouldn't pay for it.
+  let clientGone = false;
+  res.on("close", () => {
+    if (!res.writableFinished) clientGone = true;
+  });
+  const refundCredit = async (reason: string) => {
+    if (scansRemaining === null || !userId) return;
+    try {
+      const refunded = await storage.refundScanCredit(userId);
+      scansRemaining = refunded?.scansRemaining ?? scansRemaining;
+    } catch (err) {
+      req.log.error({ err, userId }, `Failed to refund scan credit after ${reason}`);
+    }
+  };
+
   type IdentifyResult = {
     found: boolean;
     confidence: number;
@@ -279,19 +295,18 @@ router.post("/identify", async (req, res) => {
   // Our failure, not a real "no match" — give the credit back and don't
   // record it in history, so the user isn't charged for it.
   if (geminiFailed) {
-    if (scansRemaining !== null && userId) {
-      try {
-        const refunded = await storage.refundScanCredit(userId);
-        scansRemaining = refunded?.scansRemaining ?? scansRemaining;
-      } catch (err) {
-        req.log.error({ err, userId }, "Failed to refund scan credit after Gemini failure");
-      }
-    }
+    await refundCredit("Gemini failure");
     res.status(502).json({
       error: "identify_failed",
       message: "We couldn't analyse that frame right now. Your scan wasn't used — please try again.",
       scansRemaining,
     });
+    return;
+  }
+
+  if (clientGone) {
+    req.log.warn({ userId }, "Client disconnected before the scan finished; refunding");
+    await refundCredit("client disconnect");
     return;
   }
 
@@ -327,6 +342,12 @@ router.post("/identify", async (req, res) => {
     historyId = inserted[0]?.id ?? null;
   } catch (err) {
     req.log.error({ err }, "Failed to save search history");
+  }
+
+  if (clientGone) {
+    req.log.warn({ userId, historyId }, "Client disconnected before the scan finished; refunding");
+    await refundCredit("client disconnect");
+    return;
   }
 
   res.json({ ...result, historyId, scansRemaining });
