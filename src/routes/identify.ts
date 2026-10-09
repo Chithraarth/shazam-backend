@@ -112,7 +112,18 @@ function buildUserContextHint(user: {
   return `\n\nUSER CONTEXT (use as a soft prior, NOT a constraint):\n${parts.join(" ")}\nWhen multiple identifications are equally plausible, prefer titles popular in the user's region/languages and consider local platforms and regional releases. NEVER force a regional match if visual evidence points elsewhere — evidence in the frame always wins.`;
 }
 
-async function callGeminiWithRetry(imageData: string, mimeType: string, contextHint: string): Promise<string> {
+// Extra frames from a camera scan: the app captures the screen for ~15s and
+// sends the frames together, so Gemini can combine clues (titles, faces,
+// captions) that only show up in some of them.
+const MAX_EXTRA_FRAMES = 7;
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
+function multiFrameNote(count: number): string {
+  if (count <= 1) return "";
+  return `\n\nMULTIPLE FRAMES: You are given ${count} frames of the same screen, captured over about 15 seconds. They show the same content. Combine evidence across ALL frames (on-screen text, logos, faces, scenes) and return ONE identification for what is playing.`;
+}
+
+async function callGeminiWithRetry(images: string[], mimeType: string, contextHint: string): Promise<string> {
   let attempts = 0;
   while (attempts < 3) {
     try {
@@ -122,13 +133,8 @@ async function callGeminiWithRetry(imageData: string, mimeType: string, contextH
           {
             role: "user",
             parts: [
-              {
-                inlineData: {
-                  mimeType: mimeType,
-                  data: imageData,
-                },
-              },
-              { text: IDENTIFICATION_PROMPT + contextHint },
+              ...images.map((data) => ({ inlineData: { mimeType, data } })),
+              { text: IDENTIFICATION_PROMPT + multiFrameNote(images.length) + contextHint },
             ],
           },
         ],
@@ -183,6 +189,15 @@ router.post("/identify", async (req, res) => {
   const imageBytes = Buffer.from(imageData, "base64");
   if (imageBytes.length > 8 * 1024 * 1024) {
     res.status(400).json({ error: "Image too large. Please use a smaller frame (max 8MB)." });
+    return;
+  }
+
+  const rawExtra: unknown = req.body?.extraFrames;
+  const extraFrames = Array.isArray(rawExtra)
+    ? rawExtra.filter((f): f is string => typeof f === "string" && f.length > 0).slice(0, MAX_EXTRA_FRAMES)
+    : [];
+  if (extraFrames.some((f) => Buffer.byteLength(f, "base64") > MAX_FRAME_BYTES)) {
+    res.status(400).json({ error: "One of the frames is too large." });
     return;
   }
 
@@ -256,7 +271,7 @@ router.post("/identify", async (req, res) => {
 
   let geminiFailed = false;
   try {
-    const rawText = await callGeminiWithRetry(imageData, mimeType, contextHint);
+    const rawText = await callGeminiWithRetry([imageData, ...extraFrames], mimeType, contextHint);
     const parsed = parseGeminiResponse(rawText);
     if (!parsed) {
       req.log.error({ rawText: rawText.slice(0, 500) }, "Gemini returned an unparseable response");
